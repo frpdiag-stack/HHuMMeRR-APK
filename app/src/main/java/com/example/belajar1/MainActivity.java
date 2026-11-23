@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.sun.security.x509.AlgorithmId;
@@ -64,6 +65,8 @@ public class MainActivity extends AppCompatActivity {
     private ScrollView scrollLog;
     private EditText etCommand;
     private NsdManager nsdManager;
+    private WifiManager.MulticastLock multicastLock;
+    private NsdManager.DiscoveryListener currentDiscoveryListener;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private HHuMMeRRAdbManager adbManager;
@@ -81,7 +84,14 @@ public class MainActivity extends AppCompatActivity {
         etCommand = findViewById(R.id.etCommand);
         nsdManager = (NsdManager) getSystemService(Context.NSD_SERVICE);
 
-        // تجهيز محرك ADB ومفاتيح التشفير
+        // فتح قفل استقبال إشارات الواي فاي (مهم جداً لأجهزة شاومي وسامسونج)
+        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifi != null) {
+            multicastLock = wifi.createMulticastLock("HHuMMeRR_mDNS");
+            multicastLock.setReferenceCounted(true);
+            multicastLock.acquire();
+        }
+
         executor.execute(() -> {
             try {
                 adbManager = new HHuMMeRRAdbManager(getApplicationContext());
@@ -103,7 +113,7 @@ public class MainActivity extends AppCompatActivity {
 
         btnConnect.setOnClickListener(v -> {
             appendLog("[*] جاري البحث عن الجهاز المتصل على الشبكة...");
-            startDiscovery("_adb-tls-connect._tcp.");
+            startDiscovery("_adb-tls-connect._tcp");
         });
 
         btnSend.setOnClickListener(v -> {
@@ -114,7 +124,6 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // زر قراءة المعلومات (بدون طباعة الأمر البرمجي)
         btnReadInfo.setOnClickListener(v -> {
             appendLog("\n[*] جاري قراءة معلومات الجهاز...");
             String infoCmd = "echo '=== Device Info ===' && " +
@@ -127,11 +136,19 @@ public class MainActivity extends AppCompatActivity {
             executeAdbCommand(infoCmd, false);
         });
 
-        // زر إعادة التشغيل للريكفري (بدون طباعة الأمر البرمجي)
         btnRebootRecovery.setOnClickListener(v -> {
             appendLog("\n[!] جاري إعادة تشغيل الجهاز إلى وضع الريكفري...");
             executeAdbCommand("reboot recovery", false);
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        stopCurrentDiscovery();
+        if (multicastLock != null && multicastLock.isHeld()) {
+            multicastLock.release();
+        }
     }
 
     private void showPairingQrDialog() {
@@ -170,15 +187,26 @@ public class MainActivity extends AppCompatActivity {
             appendLog("[QR] تم توليد رمز الإقران (" + activeServiceName + ")");
             appendLog("[*] بانتظار مسح الكود من الجهاز المستهدف...");
 
-            startDiscovery("_adb-tls-pairing._tcp.");
+            startDiscovery("_adb-tls-pairing._tcp");
 
         } catch (Exception e) {
             appendLog("[خطأ في توليد QR] " + e.getMessage());
         }
     }
 
+    private void stopCurrentDiscovery() {
+        if (currentDiscoveryListener != null) {
+            try {
+                nsdManager.stopServiceDiscovery(currentDiscoveryListener);
+            } catch (Exception ignored) {}
+            currentDiscoveryListener = null;
+        }
+    }
+
     private void startDiscovery(String serviceType) {
-        NsdManager.DiscoveryListener discoveryListener = new NsdManager.DiscoveryListener() {
+        stopCurrentDiscovery();
+
+        currentDiscoveryListener = new NsdManager.DiscoveryListener() {
             @Override
             public void onDiscoveryStarted(String regType) {}
 
@@ -186,7 +214,9 @@ public class MainActivity extends AppCompatActivity {
             public void onServiceFound(NsdServiceInfo service) {
                 nsdManager.resolveService(service, new NsdManager.ResolveListener() {
                     @Override
-                    public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {}
+                    public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
+                        appendLog("[!] فشل قراءة عنوان الجهاز (كود: " + errorCode + ")");
+                    }
 
                     @Override
                     public void onServiceResolved(NsdServiceInfo serviceInfo) {
@@ -197,6 +227,7 @@ public class MainActivity extends AppCompatActivity {
                         if (serviceType.contains("pairing") && activePassword != null) {
                             String pwd = activePassword;
                             activePassword = null;
+                            stopCurrentDiscovery();
                             runOnUiThread(() -> {
                                 if (qrDialog != null && qrDialog.isShowing()) {
                                     qrDialog.dismiss();
@@ -204,6 +235,7 @@ public class MainActivity extends AppCompatActivity {
                             });
                             pairDevice(ip, port, pwd);
                         } else if (serviceType.contains("connect")) {
+                            stopCurrentDiscovery();
                             connectDevice(ip, port);
                         }
                     }
@@ -214,12 +246,16 @@ public class MainActivity extends AppCompatActivity {
             public void onServiceLost(NsdServiceInfo service) {}
             @Override
             public void onDiscoveryStopped(String serviceType) {}
+
             @Override
-            public void onStartDiscoveryFailed(String serviceType, int errorCode) {}
+            public void onStartDiscoveryFailed(String serviceType, int errorCode) {
+                appendLog("[!] فشل بدء البحث على الشبكة (كود: " + errorCode + ")");
+            }
+
             @Override
             public void onStopDiscoveryFailed(String serviceType, int errorCode) {}
         };
-        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener);
+        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, currentDiscoveryListener);
     }
 
     private void pairDevice(String ip, int port, String password) {
@@ -284,7 +320,6 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // كلاس إدارة اتصال ADB وتوليد مفاتيح التشفير
     private static class HHuMMeRRAdbManager extends AbsAdbConnectionManager {
         private final PrivateKey privateKey;
         private final Certificate certificate;
