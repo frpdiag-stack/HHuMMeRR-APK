@@ -32,6 +32,7 @@ dependencies {
 implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.github.MuntashirAkon:libadb-android:3.1.0")
 implementation("com.github.MuntashirAkon:sun-security-android:1.1")
+implementation("org.conscrypt:conscrypt-android:2.5.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
     implementation("androidx.appcompat:appcompat:1.6.1")
